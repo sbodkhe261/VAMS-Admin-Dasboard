@@ -14,7 +14,7 @@ import {
   Bell
 } from 'lucide-react';
 
-const API_BASE_URL = 'http://localhost:3001';
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
 axios.defaults.baseURL = API_BASE_URL;
 
 // Add token interceptor to axios
