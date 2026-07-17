@@ -1,0 +1,215 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Company {
+  id              String           @id @default(uuid())
+  name            String           @unique
+  isActive        Boolean          @default(true)
+  tier            String           @default("BASIC")
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  settings        CompanySettings?
+  users           User[]
+  alerts          Alert[]
+
+  @@map("companies")
+}
+
+model CompanySettings {
+  id                 String     @id @default(uuid())
+  companyId          String     @unique
+  soundEmergency     String     @default("siren.mp3")
+  maxUsers           Int        @default(0)       // 0 indicates unlimited users
+  allowedRoles       String[]   @default([])      // Whitelisted roles allowed to log in/register
+  whatsappEnabled    Boolean    @default(false)
+  whatsappApiKey     String?
+  whatsappSenderNum  String?
+  rulebook           Json       @default("{}")
+  createdAt          DateTime   @default(now())
+  updatedAt          DateTime   @updatedAt
+  company            Company    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@map("company_settings")
+}
+
+model User {
+  id                String                     @id @default(uuid())
+  email             String
+  passwordHash      String
+  name              String
+  role              UserRole                   @default(WORKER)
+  companyId         String
+  isActive          Boolean                    @default(true)
+  createdAt         DateTime                   @default(now())
+  updatedAt         DateTime                   @updatedAt
+  company           Company                    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  assignments       AlertAssignmentHistory[]   @relation("AssignedToUser")
+  actioned          AlertAssignmentHistory[]   @relation("AssignedByUser")
+  assignedAlerts    Alert[]                    @relation("AssignedUser")
+  timelineEvents    DefectResolutionTimeline[]
+  resolutions       Resolution[]
+
+  @@unique([companyId, email])
+  @@map("users")
+}
+
+model Alert {
+  id                 String                     @id @default(uuid())
+  vin                String?
+  companyId          String
+  defectId           String?
+  defectName         String?
+  alertDefinitionId  String?
+  severity           Severity                   @default(MEDIUM)
+  status             AlertStatus                @default(OPEN)
+  assignedToUserId   String?
+  assignedToRole     UserRole?
+  createdById        String?
+  isManual           Boolean                    @default(true)
+  lastReminderSentAt DateTime?
+  createdAt          DateTime                   @default(now())
+  updatedAt          DateTime                   @updatedAt
+  company            Company                    @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  assignedToUser     User?                      @relation("AssignedUser", fields: [assignedToUserId], references: [id])
+  assignments        AlertAssignmentHistory[]
+  timeline           DefectResolutionTimeline[]
+  resolution         Resolution?
+
+  @@index([companyId])
+  @@index([status])
+  @@map("alerts")
+}
+
+model AlertAssignmentHistory {
+  id               String    @id @default(uuid())
+  alertId          String
+  assignedByUserId String
+  assignedToUserId String?
+  assignedToRole   UserRole?
+  notes            String?
+  assignedAt       DateTime  @default(now())
+  alert            Alert     @relation(fields: [alertId], references: [id], onDelete: Cascade)
+  assignedByUser   User      @relation("AssignedByUser", fields: [assignedByUserId], references: [id])
+  assignedToUser   User?     @relation("AssignedToUser", fields: [assignedToUserId], references: [id])
+
+  @@map("alert_assignment_histories")
+}
+
+model DefectResolutionTimeline {
+  id                String   @id @default(uuid())
+  alertId           String
+  actionType        String   // CREATED, ASSIGNED, RESOLVED, REOPENED
+  performedByUserId String?
+  details           String
+  createdAt         DateTime @default(now())
+  alert             Alert    @relation(fields: [alertId], references: [id], onDelete: Cascade)
+  performedByUser   User?    @relation(fields: [performedByUserId], references: [id])
+
+  @@map("defect_resolution_timeline")
+}
+
+model Resolution {
+  id               String   @id @default(uuid())
+  alertId          String   @unique
+  resolvedByUserId String
+  resolvedAt       DateTime @default(now())
+  reason           String
+  createdAt        DateTime @default(now())
+  alert            Alert    @relation(fields: [alertId], references: [id], onDelete: Cascade)
+  resolvedByUser   User     @relation(fields: [resolvedByUserId], references: [id])
+
+  @@map("resolutions")
+}
+
+enum UserRole {
+  SUPER_ADMIN
+  COMPANY_ADMIN
+  FACTORY_MANAGER
+  SUPERVISOR
+  WORKER
+  QUALITY_INSPECTOR
+  SERVICE_ENGINEER
+  DEALER
+  VEHICLE_OWNER
+  READ_ONLY_USER
+}
+
+enum Severity {
+  INFO
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+  EMERGENCY
+}
+
+enum AlertStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  REOPENED
+}
+
+model AlertDefinition {
+  id                String   @id @default(uuid())
+  companyId         String
+  alertId           String   @default("")
+  name              String
+  definition        String?
+  type              String
+  severity          Severity
+  primaryAssigneeId String
+  escalationChain   String[] // user IDs
+  escalationTimeout Int      // in minutes
+  criticalOverride  Boolean  @default(false)
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@map("alert_definitions")
+}
+
+model AlertAssignment {
+  id              String    @id @default(uuid())
+  alertId         String
+  severity        Severity
+  assignedToId    String
+  assignedAt      DateTime  @default(now())
+  notifiedAt      DateTime  @default(now())
+  seenAt          DateTime?
+  reminderCount   Int       @default(0)
+  escalationLevel Int       @default(0)
+  status          String    @default("OPEN") // "OPEN", "RESOLVED", "ESCALATED"
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@map("alert_assignments")
+}
+
+model AlertNotificationLog {
+  id        String   @id @default(uuid())
+  alertId   String
+  userId    String
+  type      String   // "NOTIFICATION", "REMINDER", "ESCALATION", "BROADCAST"
+  message   String
+  createdAt DateTime @default(now())
+
+  @@map("alert_notification_logs")
+}
+
+model CompanyBroadcastLog {
+  id        String   @id @default(uuid())
+  companyId String
+  title     String
+  message   String
+  sentById  String
+  createdAt DateTime @default(now())
+
+  @@map("company_broadcast_logs")
+}
