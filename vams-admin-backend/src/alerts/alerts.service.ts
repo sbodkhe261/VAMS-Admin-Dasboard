@@ -144,9 +144,10 @@ export class AlertsService {
 
     // 3. Trigger VAMS core backend event ingestion asynchronously in the background
     const coreUrl = process.env.CORE_BACKEND_URL || 'http://127.0.0.1:3000/api/v1';
+    const fetchFn = typeof fetch !== 'undefined' ? fetch : (globalThis as any).fetch;
     (async () => {
       try {
-        await (global as any).fetch(`${coreUrl}/alerts/event`, {
+        const response = await fetchFn(`${coreUrl}/alerts/event`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -163,6 +164,12 @@ export class AlertsService {
             message: dto.notes || undefined,
           }),
         });
+        if (!response.ok) {
+          const errText = await response.text();
+          console.warn(`[NOTIFICATION SYNC WARNING] Core alerts engine returned HTTP ${response.status}: ${errText}`);
+        } else {
+          console.log(`[NOTIFICATION SYNC SUCCESS] Triggered core alerts engine for alert ${alert.id}`);
+        }
       } catch (fetchErr: any) {
         console.warn('[NOTIFICATION SYNC WARNING] Failed to trigger core alerts engine in background:', fetchErr.message);
       }
@@ -485,7 +492,7 @@ export class AlertsService {
             companyId,
             title: dto.title,
             message: dto.message,
-            targetUserIds: dto.targetUserIds || undefined,
+            targetUserIds: Array.isArray(dto.targetUserIds) && dto.targetUserIds.length > 0 ? dto.targetUserIds : undefined,
           }),
         });
 
@@ -546,6 +553,12 @@ export class AlertsService {
     return this.prisma.companyBroadcastLog.findMany({
       where: { companyId },
       orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  async deleteBroadcast(id: string) {
+    return this.prisma.companyBroadcastLog.delete({
+      where: { id },
     });
   }
 

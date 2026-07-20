@@ -87,6 +87,11 @@ export class AlertsController {
     return this.alertsService.getBroadcasts(companyId);
   }
 
+  @Delete('broadcasts/:id')
+  deleteBroadcast(@Param('id') id: string) {
+    return this.alertsService.deleteBroadcast(id);
+  }
+
   // Live Alert Actions
   @Post(':id/takeover')
   takeoverAlert(@Request() req: any, @Param('id') id: string) {

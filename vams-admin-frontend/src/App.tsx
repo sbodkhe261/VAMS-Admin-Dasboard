@@ -415,6 +415,17 @@ export default function App() {
     }
   };
 
+  const handleDeleteBroadcast = async (id: string) => {
+    if (!window.confirm('Are you sure you want to delete this broadcast audit log entry?')) return;
+    try {
+      await axios.delete(`/alerts/broadcasts/${id}`);
+      fetchBroadcasts();
+    } catch (err) {
+      console.error('Failed to delete broadcast log:', err);
+      alert('Failed to delete broadcast log');
+    }
+  };
+
 
 
   const handleSendBroadcast = async (e: React.FormEvent) => {
@@ -1925,6 +1936,7 @@ export default function App() {
                       <th className="py-4 px-4">Broadcast Title</th>
                       <th className="py-4 px-4">Message Content</th>
                       <th className="py-4 px-4">Dispatched By</th>
+                      <th className="py-4 px-4 text-right">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-white/5 text-xs text-gray-300">
@@ -1936,12 +1948,20 @@ export default function App() {
                           <td className="py-4 px-4 font-bold text-white">{br.title}</td>
                           <td className="py-4 px-4 max-w-sm truncate">{br.message}</td>
                           <td className="py-4 px-4">{sender ? sender.name : 'Administrator'}</td>
+                          <td className="py-4 px-4 text-right">
+                            <button
+                              onClick={() => handleDeleteBroadcast(br.id)}
+                              className="text-red-400 hover:text-red-300 font-semibold"
+                            >
+                              Delete
+                            </button>
+                          </td>
                         </tr>
                       );
                     })}
                     {broadcasts.length === 0 && (
                       <tr>
-                        <td colSpan={4} className="py-8 text-center text-gray-500 italic">No broadcasts sent yet.</td>
+                        <td colSpan={5} className="py-8 text-center text-gray-500 italic">No broadcasts sent yet.</td>
                       </tr>
                     )}
                   </tbody>
