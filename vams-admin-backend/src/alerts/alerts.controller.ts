@@ -74,16 +74,16 @@ export class AlertsController {
   @Post('broadcast')
   createBroadcast(@Request() req: any, @Body() dto: CreateBroadcastDto) {
     const companyId = req.user.role === 'SUPER_ADMIN'
-      ? (req.headers['x-company-id'] || req.user.companyId)
-      : req.user.companyId;
+      ? (req.headers['x-company-id'] || req.user.companyId || 'all')
+      : (req.user.companyId || 'all');
     return this.alertsService.createBroadcast(companyId, req.user.id, dto);
   }
 
   @Get('broadcasts')
   getBroadcasts(@Request() req: any) {
     const companyId = req.user.role === 'SUPER_ADMIN'
-      ? (req.headers['x-company-id'] || req.user.companyId)
-      : req.user.companyId;
+      ? (req.headers['x-company-id'] || req.user.companyId || 'all')
+      : (req.user.companyId || 'all');
     return this.alertsService.getBroadcasts(companyId);
   }
 

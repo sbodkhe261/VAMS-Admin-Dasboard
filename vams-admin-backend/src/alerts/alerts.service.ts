@@ -480,10 +480,12 @@ export class AlertsService {
 
     const coreUrl = process.env.CORE_BACKEND_URL || 'http://127.0.0.1:3000/api/v1';
     
+    const fetchFn = typeof fetch !== 'undefined' ? fetch : (globalThis as any).fetch;
+    
     // Dispatch webhook asynchronously in the background so the admin UI responds instantly
     (async () => {
       try {
-        const response = await (global as any).fetch(`${coreUrl}/alerts/event`, {
+        const response = await fetchFn(`${coreUrl}/alerts/event`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -516,9 +518,12 @@ export class AlertsService {
     try {
       const targetUsers = await this.prisma.user.findMany({
         where: {
-          companyId,
-          isActive: true,
-          ...(targetUserIds && targetUserIds.length > 0 && { id: { in: targetUserIds } }),
+          ...(targetUserIds && targetUserIds.length > 0
+            ? { id: { in: targetUserIds } }
+            : {
+                isActive: true,
+                ...(companyId && companyId !== 'all' ? { companyId } : {}),
+              }),
         },
       });
       const crypto = require('crypto');
@@ -527,7 +532,7 @@ export class AlertsService {
           `INSERT INTO notifications (id, "companyId", "userId", title, message, channel, "isRead", "createdAt")
            VALUES ($1, $2, $3, $4, $5, $6::"NotificationChannel", $7, NOW())`,
           crypto.randomUUID(),
-          companyId,
+          companyId && companyId !== 'all' ? companyId : targetUser.companyId,
           targetUser.id,
           title,
           message,
