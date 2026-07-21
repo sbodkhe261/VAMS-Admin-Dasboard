@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import axios from 'axios';
 import { io } from 'socket.io-client';
 import { 
@@ -11,7 +11,10 @@ import {
   LogOut, 
   Building, 
   AlertTriangle,
-  Bell
+  Bell,
+  Search,
+  X,
+  RefreshCw
 } from 'lucide-react';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:3001';
@@ -129,6 +132,59 @@ export default function App() {
 
   const [activeTab, setActiveTab] = useState<'overview' | 'dispatch' | 'users' | 'policy' | 'companies' | 'alerts'>('overview');
 
+  // Telemetry Modal Inspector State
+  const [telemetryModalOpen, setTelemetryModalOpen] = useState(false);
+  const [telemetryFilter, setTelemetryFilter] = useState<'ALL' | 'OPEN' | 'RESOLVED' | 'REOPENED' | 'REASSIGNED'>('ALL');
+  const [allFetchedAlerts, setAllFetchedAlerts] = useState<any[]>([]);
+  const [telemetrySearch, setTelemetrySearch] = useState('');
+  const [isLoadingTelemetryAlerts, setIsLoadingTelemetryAlerts] = useState(false);
+
+  const handleTelemetryCardClick = async (filterType: 'ALL' | 'OPEN' | 'RESOLVED' | 'REOPENED' | 'REASSIGNED') => {
+    setTelemetryFilter(filterType);
+    setTelemetryModalOpen(true);
+    setIsLoadingTelemetryAlerts(true);
+    try {
+      const res = await axios.get('/alerts');
+      setAllFetchedAlerts(res.data);
+    } catch (err) {
+      console.error('Failed to fetch telemetry alerts list:', err);
+      if (analytics?.companiesData) {
+        const aggregated = analytics.companiesData.flatMap(c => 
+          c.alerts.map(a => ({ ...a, company: { name: c.name } }))
+        );
+        setAllFetchedAlerts(aggregated);
+      }
+    } finally {
+      setIsLoadingTelemetryAlerts(false);
+    }
+  };
+
+  const filteredTelemetryAlerts = useMemo(() => {
+    let list = [...allFetchedAlerts];
+    if (telemetryFilter === 'OPEN') {
+      list = list.filter(a => a.status === 'OPEN' || a.status === 'IN_PROGRESS');
+    } else if (telemetryFilter === 'RESOLVED') {
+      list = list.filter(a => a.status === 'RESOLVED');
+    } else if (telemetryFilter === 'REOPENED') {
+      list = list.filter(a => a.status === 'REOPENED');
+    } else if (telemetryFilter === 'REASSIGNED') {
+      list = list.filter(a => a.status === 'REASSIGNED' || (a.assignments && a.assignments.length > 1) || a.isManual);
+    }
+
+    if (telemetrySearch.trim()) {
+      const q = telemetrySearch.toLowerCase();
+      list = list.filter(a => 
+        (a.vin && a.vin.toLowerCase().includes(q)) ||
+        (a.defectName && a.defectName.toLowerCase().includes(q)) ||
+        (a.severity && a.severity.toLowerCase().includes(q)) ||
+        (a.status && a.status.toLowerCase().includes(q)) ||
+        (a.assignedToUser?.name && a.assignedToUser.name.toLowerCase().includes(q)) ||
+        (a.company?.name && a.company.name.toLowerCase().includes(q))
+      );
+    }
+    return list;
+  }, [allFetchedAlerts, telemetryFilter, telemetrySearch]);
+
   // Manual Dispatch State
   const [manualAssigneeId, setManualAssigneeId] = useState('');
   const [manualSeverity, setManualSeverity] = useState('MEDIUM');
@@ -158,10 +214,21 @@ export default function App() {
   // Manual Dispatch - Alert Definition select
   const [manualAlertDefinitionId, setManualAlertDefinitionId] = useState('');
 
+  // System Roles for Role-Based Notifications & Escalation Chains
+  const SYSTEM_ROLES = [
+    { id: 'role_COMPANY_ADMIN', role: 'COMPANY_ADMIN', label: 'Company Admin (All Admins)' },
+    { id: 'role_SUPERVISOR', role: 'SUPERVISOR', label: 'Supervisor (All Supervisors)' },
+    { id: 'role_FACTORY_MANAGER', role: 'FACTORY_MANAGER', label: 'Factory Manager (All Managers)' },
+    { id: 'role_SERVICE_ENGINEER', role: 'SERVICE_ENGINEER', label: 'Service Engineer (All Engineers)' },
+    { id: 'role_WORKER', role: 'WORKER', label: 'Worker / Operator (All Workers)' },
+    { id: 'role_QUALITY_INSPECTOR', role: 'QUALITY_INSPECTOR', label: 'Quality Inspector (All Inspectors)' },
+  ];
+
   // Broadcast Message State
   const [broadcastTitle, setBroadcastTitle] = useState('');
   const [broadcastMessage, setBroadcastMessage] = useState('');
   const [broadcastTargetUserIds, setBroadcastTargetUserIds] = useState<string[]>([]);
+  const [broadcastTargetRoles, setBroadcastTargetRoles] = useState<string[]>([]);
   const [broadcastSuccess, setBroadcastSuccess] = useState('');
   const [broadcastError, setBroadcastError] = useState('');
   const [isSavingAlert, setIsSavingAlert] = useState(false);
@@ -445,15 +512,21 @@ export default function App() {
         title: broadcastTitle,
         message: broadcastMessage,
         targetUserIds: broadcastTargetUserIds.length > 0 ? broadcastTargetUserIds : undefined,
+        targetRoles: broadcastTargetRoles.length > 0 ? broadcastTargetRoles : undefined,
       });
-      if (broadcastTargetUserIds.length > 0) {
-        setBroadcastSuccess(`Broadcast message dispatched successfully to ${broadcastTargetUserIds.length} selected users!`);
+      if (broadcastTargetRoles.length > 0 || broadcastTargetUserIds.length > 0) {
+        const targetsSummary = [
+          broadcastTargetRoles.length > 0 ? `${broadcastTargetRoles.length} target role(s)` : null,
+          broadcastTargetUserIds.length > 0 ? `${broadcastTargetUserIds.length} user(s)` : null,
+        ].filter(Boolean).join(' & ');
+        setBroadcastSuccess(`Broadcast message dispatched successfully to targeted ${targetsSummary}!`);
       } else {
-        setBroadcastSuccess('Broadcast message dispatched successfully to all users!');
+        setBroadcastSuccess('Broadcast message dispatched successfully to all company operators!');
       }
       setBroadcastTitle('');
       setBroadcastMessage('');
       setBroadcastTargetUserIds([]);
+      setBroadcastTargetRoles([]);
       fetchBroadcasts();
     } catch (err: any) {
       setBroadcastError(err.response?.data?.message || 'Failed to dispatch broadcast');
@@ -849,46 +922,141 @@ export default function App() {
         {/* Overview Tab Content */}
         {activeTab === 'overview' && (
           <div className="space-y-8">
-            {/* Stat Counters */}
-            <div className="grid grid-cols-1 md:grid-cols-5 gap-5">
-              <div className="glass-panel p-6 relative overflow-hidden flex flex-col justify-between min-h-[140px] rounded-2xl border border-white/5">
-                <span className="text-[11px] font-bold text-gray-400 uppercase tracking-widest">Total Defects</span>
-                <h3 className="text-3xl font-extrabold text-white mt-2" style={{ fontFamily: 'var(--font-title)' }}>
-                  {analytics?.summary?.totalDefects ?? 0}
-                </h3>
-                <span className="text-[10px] text-gray-500 mt-2">Cumulative lifetime alerts</span>
+            {/* Stat Counters - Single Line Row */}
+            <div className="grid grid-cols-5 gap-3 lg:gap-4 w-full">
+              {/* Total Defects */}
+              <div 
+                onClick={() => handleTelemetryCardClick('ALL')}
+                className={`glass-panel p-4 lg:p-5 relative overflow-hidden flex flex-col justify-between rounded-2xl border transition-all duration-300 hover:-translate-y-1 shadow-lg group min-h-[140px] cursor-pointer ${
+                  telemetryModalOpen && telemetryFilter === 'ALL'
+                    ? 'border-blue-500 ring-2 ring-blue-500/50 bg-blue-500/10'
+                    : 'border-white/10 hover:border-blue-500/40'
+                }`}
+              >
+                <div className="absolute top-0 right-0 w-24 h-24 bg-blue-500/5 rounded-full blur-xl group-hover:bg-blue-500/10 transition-all"></div>
+                <div className="flex items-center justify-between gap-1.5">
+                  <span className="text-[10px] xl:text-[11px] font-bold text-gray-400 uppercase tracking-wider truncate" title="Total Defects (Click to inspect all alerts)">Total Defects</span>
+                  <div className="w-7 h-7 lg:w-8 lg:h-8 rounded-lg lg:rounded-xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center shrink-0">
+                    <Activity className="w-3.5 h-3.5 lg:w-4 lg:h-4 text-blue-400" />
+                  </div>
+                </div>
+                <div className="my-1.5">
+                  <h3 className="text-2xl lg:text-3xl xl:text-4xl font-extrabold text-white tracking-tight" style={{ fontFamily: 'var(--font-title)' }}>
+                    {analytics?.summary?.totalDefects ?? 0}
+                  </h3>
+                </div>
+                <div className="flex items-center gap-1.5 text-[9px] xl:text-[10px] text-gray-400 font-medium">
+                  <span className="w-1.5 h-1.5 rounded-full bg-blue-400 shrink-0"></span>
+                  <span className="truncate" title="Click to view all alerts">Cumulative lifetime alerts</span>
+                </div>
               </div>
 
-              <div className="glass-panel p-6 relative overflow-hidden flex flex-col justify-between border-l-4 border-amber-500 min-h-[140px] rounded-2xl">
-                <span className="text-[11px] font-bold text-gray-400 uppercase tracking-widest">Open Defects</span>
-                <h3 className="text-3xl font-extrabold text-amber-500 mt-2" style={{ fontFamily: 'var(--font-title)' }}>
-                  {analytics?.summary?.openDefects ?? 0}
-                </h3>
-                <span className="text-[10px] text-gray-500 mt-2">Awaiting engineering resolve</span>
+              {/* Open Defects */}
+              <div 
+                onClick={() => handleTelemetryCardClick('OPEN')}
+                className={`glass-panel p-4 lg:p-5 relative overflow-hidden flex flex-col justify-between rounded-2xl border border-l-4 border-l-amber-500 transition-all duration-300 hover:-translate-y-1 shadow-lg group min-h-[140px] cursor-pointer ${
+                  telemetryModalOpen && telemetryFilter === 'OPEN'
+                    ? 'border-amber-500 ring-2 ring-amber-500/50 bg-amber-500/10'
+                    : 'border-amber-500/20 hover:border-amber-500/40'
+                }`}
+              >
+                <div className="absolute top-0 right-0 w-24 h-24 bg-amber-500/5 rounded-full blur-xl group-hover:bg-amber-500/10 transition-all"></div>
+                <div className="flex items-center justify-between gap-1.5">
+                  <span className="text-[10px] xl:text-[11px] font-bold text-amber-400/90 uppercase tracking-wider truncate" title="Open Defects (Click to inspect open alerts)">Open Defects</span>
+                  <div className="w-7 h-7 lg:w-8 lg:h-8 rounded-lg lg:rounded-xl bg-amber-500/10 border border-amber-500/20 flex items-center justify-center shrink-0">
+                    <AlertTriangle className="w-3.5 h-3.5 lg:w-4 lg:h-4 text-amber-400" />
+                  </div>
+                </div>
+                <div className="my-1.5">
+                  <h3 className="text-2xl lg:text-3xl xl:text-4xl font-extrabold text-amber-400 tracking-tight" style={{ fontFamily: 'var(--font-title)' }}>
+                    {analytics?.summary?.openDefects ?? 0}
+                  </h3>
+                </div>
+                <div className="flex items-center gap-1.5 text-[9px] xl:text-[10px] text-amber-400/80 font-medium">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0 animate-pulse"></span>
+                  <span className="truncate" title="Click to view open alerts">Awaiting engineering resolve</span>
+                </div>
               </div>
 
-              <div className="glass-panel p-6 relative overflow-hidden flex flex-col justify-between border-l-4 border-emerald-500 min-h-[140px] rounded-2xl">
-                <span className="text-[11px] font-bold text-gray-400 uppercase tracking-widest">Resolved Defects</span>
-                <h3 className="text-3xl font-extrabold text-emerald-500 mt-2" style={{ fontFamily: 'var(--font-title)' }}>
-                  {analytics?.summary?.resolvedDefects ?? 0}
-                </h3>
-                <span className="text-[10px] text-gray-500 mt-2">Successfully closed tasks</span>
+              {/* Resolved Defects */}
+              <div 
+                onClick={() => handleTelemetryCardClick('RESOLVED')}
+                className={`glass-panel p-4 lg:p-5 relative overflow-hidden flex flex-col justify-between rounded-2xl border border-l-4 border-l-emerald-500 transition-all duration-300 hover:-translate-y-1 shadow-lg group min-h-[140px] cursor-pointer ${
+                  telemetryModalOpen && telemetryFilter === 'RESOLVED'
+                    ? 'border-emerald-500 ring-2 ring-emerald-500/50 bg-emerald-500/10'
+                    : 'border-emerald-500/20 hover:border-emerald-500/40'
+                }`}
+              >
+                <div className="absolute top-0 right-0 w-24 h-24 bg-emerald-500/5 rounded-full blur-xl group-hover:bg-emerald-500/10 transition-all"></div>
+                <div className="flex items-center justify-between gap-1.5">
+                  <span className="text-[10px] xl:text-[11px] font-bold text-emerald-400/90 uppercase tracking-wider truncate" title="Resolved Defects (Click to inspect resolved alerts)">Resolved Defects</span>
+                  <div className="w-7 h-7 lg:w-8 lg:h-8 rounded-lg lg:rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center shrink-0">
+                    <CheckCircle className="w-3.5 h-3.5 lg:w-4 lg:h-4 text-emerald-400" />
+                  </div>
+                </div>
+                <div className="my-1.5">
+                  <h3 className="text-2xl lg:text-3xl xl:text-4xl font-extrabold text-emerald-400 tracking-tight" style={{ fontFamily: 'var(--font-title)' }}>
+                    {analytics?.summary?.resolvedDefects ?? 0}
+                  </h3>
+                </div>
+                <div className="flex items-center gap-1.5 text-[9px] xl:text-[10px] text-emerald-400/80 font-medium">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0"></span>
+                  <span className="truncate" title="Click to view resolved alerts">Successfully closed tasks</span>
+                </div>
               </div>
 
-              <div className="glass-panel p-6 relative overflow-hidden flex flex-col justify-between border-l-4 border-rose-500 min-h-[140px] rounded-2xl">
-                <span className="text-[11px] font-bold text-gray-400 uppercase tracking-widest">Reopened Defects</span>
-                <h3 className="text-3xl font-extrabold text-rose-500 mt-2" style={{ fontFamily: 'var(--font-title)' }}>
-                  {analytics?.summary?.reopenedDefects ?? 0}
-                </h3>
-                <span className="text-[10px] text-gray-500 mt-2">Recurrent faults reported</span>
+              {/* Reopened Defects */}
+              <div 
+                onClick={() => handleTelemetryCardClick('REOPENED')}
+                className={`glass-panel p-4 lg:p-5 relative overflow-hidden flex flex-col justify-between rounded-2xl border border-l-4 border-l-rose-500 transition-all duration-300 hover:-translate-y-1 shadow-lg group min-h-[140px] cursor-pointer ${
+                  telemetryModalOpen && telemetryFilter === 'REOPENED'
+                    ? 'border-rose-500 ring-2 ring-rose-500/50 bg-rose-500/10'
+                    : 'border-rose-500/20 hover:border-rose-500/40'
+                }`}
+              >
+                <div className="absolute top-0 right-0 w-24 h-24 bg-rose-500/5 rounded-full blur-xl group-hover:bg-rose-500/10 transition-all"></div>
+                <div className="flex items-center justify-between gap-1.5">
+                  <span className="text-[10px] xl:text-[11px] font-bold text-rose-400/90 uppercase tracking-wider truncate" title="Reopened Defects (Click to inspect reopened alerts)">Reopened Defects</span>
+                  <div className="w-7 h-7 lg:w-8 lg:h-8 rounded-lg lg:rounded-xl bg-rose-500/10 border border-rose-500/20 flex items-center justify-center shrink-0">
+                    <ShieldAlert className="w-3.5 h-3.5 lg:w-4 lg:h-4 text-rose-400" />
+                  </div>
+                </div>
+                <div className="my-1.5">
+                  <h3 className="text-2xl lg:text-3xl xl:text-4xl font-extrabold text-rose-400 tracking-tight" style={{ fontFamily: 'var(--font-title)' }}>
+                    {analytics?.summary?.reopenedDefects ?? 0}
+                  </h3>
+                </div>
+                <div className="flex items-center gap-1.5 text-[9px] xl:text-[10px] text-rose-400/80 font-medium">
+                  <span className="w-1.5 h-1.5 rounded-full bg-rose-400 shrink-0"></span>
+                  <span className="truncate" title="Click to view reopened alerts">Recurrent faults reported</span>
+                </div>
               </div>
 
-              <div className="glass-panel p-6 relative overflow-hidden flex flex-col justify-between border-l-4 border-sky-500 min-h-[140px] rounded-2xl">
-                <span className="text-[11px] font-bold text-gray-400 uppercase tracking-widest">Reassigned Defects</span>
-                <h3 className="text-3xl font-extrabold text-sky-500 mt-2" style={{ fontFamily: 'var(--font-title)' }}>
-                  {analytics?.summary?.reassignedDefects ?? 0}
-                </h3>
-                <span className="text-[10px] text-gray-500 mt-2">Handovers and re-routings</span>
+              {/* Reassigned Defects */}
+              <div 
+                onClick={() => handleTelemetryCardClick('REASSIGNED')}
+                className={`glass-panel p-4 lg:p-5 relative overflow-hidden flex flex-col justify-between rounded-2xl border border-l-4 border-l-sky-500 transition-all duration-300 hover:-translate-y-1 shadow-lg group min-h-[140px] cursor-pointer ${
+                  telemetryModalOpen && telemetryFilter === 'REASSIGNED'
+                    ? 'border-sky-500 ring-2 ring-sky-500/50 bg-sky-500/10'
+                    : 'border-sky-500/20 hover:border-sky-500/40'
+                }`}
+              >
+                <div className="absolute top-0 right-0 w-24 h-24 bg-sky-500/5 rounded-full blur-xl group-hover:bg-sky-500/10 transition-all"></div>
+                <div className="flex items-center justify-between gap-1.5">
+                  <span className="text-[10px] xl:text-[11px] font-bold text-sky-400/90 uppercase tracking-wider truncate" title="Reassigned Defects (Click to inspect reassigned alerts)">Reassigned Defects</span>
+                  <div className="w-7 h-7 lg:w-8 lg:h-8 rounded-lg lg:rounded-xl bg-sky-500/10 border border-sky-500/20 flex items-center justify-center shrink-0">
+                    <Users className="w-3.5 h-3.5 lg:w-4 lg:h-4 text-sky-400" />
+                  </div>
+                </div>
+                <div className="my-1.5">
+                  <h3 className="text-2xl lg:text-3xl xl:text-4xl font-extrabold text-sky-400 tracking-tight" style={{ fontFamily: 'var(--font-title)' }}>
+                    {analytics?.summary?.reassignedDefects ?? 0}
+                  </h3>
+                </div>
+                <div className="flex items-center gap-1.5 text-[9px] xl:text-[10px] text-sky-400/80 font-medium">
+                  <span className="w-1.5 h-1.5 rounded-full bg-sky-400 shrink-0"></span>
+                  <span className="truncate" title="Click to view reassigned alerts">Handovers and re-routings</span>
+                </div>
               </div>
             </div>
 
@@ -1602,40 +1770,61 @@ export default function App() {
                     </div>
 
                     <div>
-                      <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Primary Assignee</label>
+                      <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Primary Assignee (Role / Employee)</label>
                       <select
                         required
                         value={defPrimaryAssignee}
                         onChange={e => setDefPrimaryAssignee(e.target.value)}
                         className="w-full bg-[#121620] border border-white/10 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-[#3b82f6] transition-all cursor-pointer"
                       >
-                        <option value="">Select Employee...</option>
-                        {analytics?.userPerformance?.filter(u => !selectedCompanyId || selectedCompanyId === 'all' || u.companyId === selectedCompanyId || userProfile?.role !== 'SUPER_ADMIN').map(u => (
-                          <option key={u.id} value={u.id}>{u.name} ({u.role})</option>
-                        ))}
+                        <option value="">Select Role or Employee...</option>
+                        <optgroup label="System Roles (Notifies All Users with Role)" className="text-gray-400 font-semibold bg-[#171c2a]">
+                          {SYSTEM_ROLES.map(r => (
+                            <option key={r.id} value={r.id} className="text-white font-semibold">
+                              {r.label}
+                            </option>
+                          ))}
+                        </optgroup>
+                        <optgroup label="Specific Individual Employees" className="text-gray-400 font-semibold bg-[#171c2a]">
+                          {analytics?.userPerformance?.filter(u => !selectedCompanyId || selectedCompanyId === 'all' || u.companyId === selectedCompanyId || userProfile?.role !== 'SUPER_ADMIN').map(u => (
+                            <option key={u.id} value={u.id} className="text-white">
+                              {u.name} ({u.role})
+                            </option>
+                          ))}
+                        </optgroup>
                       </select>
                     </div>
                   </div>
 
                   <div>
                     <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
-                      Escalation Chain (Ordered Notification List)
+                      Escalation Chain (Ordered Role / User Notification List)
                     </label>
-                    <p className="text-[10px] text-gray-400 mb-2">Click employees below to add/remove them from the escalation queue order</p>
+                    <p className="text-[10px] text-gray-400 mb-2">Click roles or employees below to add/remove them from the SLA escalation queue order</p>
                     <div className="flex flex-wrap gap-2 p-3 bg-[#121620] border border-white/10 rounded-xl min-h-[50px]">
                       {defEscalationChain.length === 0 ? (
-                        <span className="text-xs text-gray-500 italic">No operators in escalation chain</span>
+                        <span className="text-xs text-gray-500 italic">No role or operator steps in escalation chain</span>
                       ) : (
-                        defEscalationChain.map((uid, index) => {
-                          const userObj = analytics?.userPerformance?.find(u => u.id === uid);
+                        defEscalationChain.map((item, index) => {
+                          const systemRoleMatch = SYSTEM_ROLES.find(r => r.id === item || r.role === item || `role_${r.role}` === item);
+                          const userObj = analytics?.userPerformance?.find(u => u.id === item);
+                          const isRoleItem = !!systemRoleMatch || item.startsWith('role_');
+                          const displayName = systemRoleMatch 
+                            ? `All ${systemRoleMatch.role.replace('_', ' ')}s` 
+                            : (userObj ? userObj.name : item);
+
                           return (
-                            <div key={uid} className="flex items-center gap-1.5 bg-[#3b82f6]/20 border border-[#3b82f6]/30 text-white text-xs px-2.5 py-1 rounded-lg">
-                              <span className="font-bold text-[#3b82f6]">{index + 1}.</span>
-                              <span>{userObj ? userObj.name : 'Unknown'}</span>
+                            <div key={item} className={`flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg border ${
+                              isRoleItem 
+                                ? 'bg-purple-950/50 border-purple-500/40 text-purple-300 font-semibold' 
+                                : 'bg-[#3b82f6]/20 border-[#3b82f6]/30 text-white font-medium'
+                            }`}>
+                              <span className="font-bold">{index + 1}.</span>
+                              <span>{isRoleItem ? `[ROLE] ${displayName}` : displayName}</span>
                               <button
                                 type="button"
-                                onClick={() => setDefEscalationChain(defEscalationChain.filter(id => id !== uid))}
-                                className="text-gray-400 hover:text-white font-bold"
+                                onClick={() => setDefEscalationChain(defEscalationChain.filter(id => id !== item))}
+                                className="text-gray-400 hover:text-white font-bold ml-1"
                               >
                                 &times;
                               </button>
@@ -1644,21 +1833,47 @@ export default function App() {
                         })
                       )}
                     </div>
-                    <div className="mt-2 flex flex-wrap gap-1.5 max-h-[120px] overflow-y-auto p-1">
-                      {analytics?.userPerformance?.filter(u => !selectedCompanyId || selectedCompanyId === 'all' || u.companyId === selectedCompanyId || userProfile?.role !== 'SUPER_ADMIN').map(u => {
-                        const isInChain = defEscalationChain.includes(u.id);
-                        if (isInChain || u.id === defPrimaryAssignee) return null;
-                        return (
-                          <button
-                            key={u.id}
-                            type="button"
-                            onClick={() => setDefEscalationChain([...defEscalationChain, u.id])}
-                            className="bg-white/5 hover:bg-white/10 text-[10px] px-2 py-1 rounded border border-white/5 transition-all text-gray-300"
-                          >
-                            + {u.name} ({u.role})
-                          </button>
-                        );
-                      })}
+                    
+                    {/* Add Roles to Escalation Chain */}
+                    <div className="mt-2 space-y-1">
+                      <span className="text-[10px] text-purple-400 font-bold uppercase tracking-wider block">Add System Role:</span>
+                      <div className="flex flex-wrap gap-1.5">
+                        {SYSTEM_ROLES.map(r => {
+                          const isInChain = defEscalationChain.includes(r.id) || defEscalationChain.includes(r.role);
+                          if (isInChain || defPrimaryAssignee === r.id || defPrimaryAssignee === r.role) return null;
+                          return (
+                            <button
+                              key={r.id}
+                              type="button"
+                              onClick={() => setDefEscalationChain([...defEscalationChain, r.id])}
+                              className="bg-purple-950/40 hover:bg-purple-900/60 text-purple-300 border border-purple-800/40 text-[10px] px-2.5 py-1 rounded-lg transition-all font-semibold"
+                            >
+                              + [ROLE] {r.role.replace('_', ' ')}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Add Employees to Escalation Chain */}
+                    <div className="mt-2 space-y-1">
+                      <span className="text-[10px] text-gray-400 font-bold uppercase tracking-wider block">Add Specific Employee:</span>
+                      <div className="flex flex-wrap gap-1.5 max-h-[100px] overflow-y-auto p-1">
+                        {analytics?.userPerformance?.filter(u => !selectedCompanyId || selectedCompanyId === 'all' || u.companyId === selectedCompanyId || userProfile?.role !== 'SUPER_ADMIN').map(u => {
+                          const isInChain = defEscalationChain.includes(u.id);
+                          if (isInChain || u.id === defPrimaryAssignee) return null;
+                          return (
+                            <button
+                              key={u.id}
+                              type="button"
+                              onClick={() => setDefEscalationChain([...defEscalationChain, u.id])}
+                              className="bg-white/5 hover:bg-white/10 text-[10px] px-2 py-1 rounded border border-white/5 transition-all text-gray-300"
+                            >
+                              + {u.name} ({u.role})
+                            </button>
+                          );
+                        })}
+                      </div>
                     </div>
                   </div>
 
@@ -1746,10 +1961,33 @@ export default function App() {
                     </div>
 
                     <div>
-                      <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
-                        Target Users (Optional - Send to all if none selected)
+                      <label className="block text-xs font-semibold text-purple-400 uppercase tracking-wider mb-2">
+                        Target System Roles (Notifies all active users of selected role)
                       </label>
-                      <div className="bg-[#121620] border border-white/10 rounded-xl p-3 max-h-[150px] overflow-y-auto space-y-2">
+                      <div className="bg-[#121620] border border-purple-500/20 rounded-xl p-3 max-h-[140px] overflow-y-auto space-y-2 mb-3">
+                        {SYSTEM_ROLES.map(r => (
+                          <label key={r.id} className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer hover:text-white">
+                            <input
+                              type="checkbox"
+                              checked={broadcastTargetRoles.includes(r.role)}
+                              onChange={() => {
+                                if (broadcastTargetRoles.includes(r.role)) {
+                                  setBroadcastTargetRoles(broadcastTargetRoles.filter(role => role !== r.role));
+                                } else {
+                                  setBroadcastTargetRoles([...broadcastTargetRoles, r.role]);
+                                }
+                              }}
+                              className="w-4 h-4 rounded border-white/10 text-purple-500 focus:ring-purple-500 cursor-pointer"
+                            />
+                            <span className="font-semibold text-purple-300">[ROLE] {r.label}</span>
+                          </label>
+                        ))}
+                      </div>
+
+                      <label className="block text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">
+                        Target Specific Users (Optional)
+                      </label>
+                      <div className="bg-[#121620] border border-white/10 rounded-xl p-3 max-h-[130px] overflow-y-auto space-y-2">
                         {analytics?.userPerformance?.filter(u => !selectedCompanyId || selectedCompanyId === 'all' || u.companyId === selectedCompanyId || userProfile?.role !== 'SUPER_ADMIN').map(u => (
                           <label key={u.id} className="flex items-center gap-2 text-xs text-gray-300 cursor-pointer hover:text-white">
                             <input
@@ -2345,6 +2583,161 @@ export default function App() {
           </div>
         )}
       </main>
+      {/* Telemetry Inspector Modal */}
+      {telemetryModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-fadeIn">
+          <div className="glass-panel w-full max-w-5xl max-h-[90vh] flex flex-col rounded-3xl border border-white/10 shadow-2xl overflow-hidden relative">
+            {/* Modal Header */}
+            <div className="p-6 border-b border-white/10 flex flex-wrap items-center justify-between gap-4 bg-[#0e121c]/90">
+              <div>
+                <div className="flex items-center gap-2">
+                  <Activity className="w-5 h-5 text-blue-500" />
+                  <h2 className="text-xl font-bold text-white tracking-tight" style={{ fontFamily: 'var(--font-title)' }}>
+                    {telemetryFilter === 'ALL' && 'Total Lifetime Defects'}
+                    {telemetryFilter === 'OPEN' && 'Open & In-Progress Defects'}
+                    {telemetryFilter === 'RESOLVED' && 'Resolved & Closed Defects'}
+                    {telemetryFilter === 'REOPENED' && 'Reopened Recurrent Defects'}
+                    {telemetryFilter === 'REASSIGNED' && 'Reassigned & Handover Defects'}
+                  </h2>
+                  <span className={`text-xs px-2.5 py-0.5 rounded-full font-bold border ${
+                    telemetryFilter === 'ALL' ? 'bg-blue-500/10 border-blue-500/20 text-blue-400' :
+                    telemetryFilter === 'OPEN' ? 'bg-amber-500/10 border-amber-500/20 text-amber-400' :
+                    telemetryFilter === 'RESOLVED' ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400' :
+                    telemetryFilter === 'REOPENED' ? 'bg-rose-500/10 border-rose-500/20 text-rose-400' :
+                    'bg-sky-500/10 border-sky-500/20 text-sky-400'
+                  }`}>
+                    {filteredTelemetryAlerts.length} Defects Found
+                  </span>
+                </div>
+                <p className="text-xs text-gray-400 mt-1">
+                  {telemetryFilter === 'ALL' && 'Showing all cumulative lifetime defect alerts across the system'}
+                  {telemetryFilter === 'OPEN' && 'Showing only active defects awaiting engineering resolution'}
+                  {telemetryFilter === 'RESOLVED' && 'Showing only successfully closed and verified defect tasks'}
+                  {telemetryFilter === 'REOPENED' && 'Showing only recurrent faults that were reopened'}
+                  {telemetryFilter === 'REASSIGNED' && 'Showing defects that underwent operator reassignment or handovers'}
+                </p>
+              </div>
+
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={() => handleTelemetryCardClick(telemetryFilter)}
+                  title="Refresh telemetry"
+                  className="p-2 text-gray-400 hover:text-white bg-white/5 hover:bg-white/10 rounded-xl border border-white/5 transition-all flex items-center gap-1 text-xs"
+                >
+                  <RefreshCw className={`w-4 h-4 ${isLoadingTelemetryAlerts ? 'animate-spin text-blue-400' : ''}`} />
+                  <span className="hidden sm:inline">Refresh</span>
+                </button>
+                <button
+                  onClick={() => setTelemetryModalOpen(false)}
+                  className="p-2 text-gray-400 hover:text-white bg-white/5 hover:bg-white/10 rounded-xl border border-white/5 transition-all"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Search Bar */}
+            <div className="px-6 py-3 border-b border-white/5 bg-[#090b10] flex items-center justify-between gap-4">
+              <div className="relative flex-1">
+                <Search className="w-4 h-4 text-gray-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  value={telemetrySearch}
+                  onChange={e => setTelemetrySearch(e.target.value)}
+                  placeholder={`Search within ${telemetryFilter.toLowerCase()} defects by VIN, name, operator, or tenant...`}
+                  className="w-full bg-[#121620] border border-white/10 rounded-xl pl-9 pr-4 py-2 text-xs text-white placeholder-gray-500 focus:outline-none focus:border-blue-500 transition-all"
+                />
+                {telemetrySearch && (
+                  <button onClick={() => setTelemetrySearch('')} className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-500 hover:text-white">
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Table Body */}
+            <div className="p-6 overflow-y-auto max-h-[60vh]">
+              {isLoadingTelemetryAlerts ? (
+                <div className="flex flex-col items-center justify-center py-16 text-gray-400">
+                  <RefreshCw className="w-8 h-8 animate-spin text-blue-500 mb-3" />
+                  <p className="text-xs font-medium">Fetching telemetry records...</p>
+                </div>
+              ) : filteredTelemetryAlerts.length > 0 ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse">
+                    <thead>
+                      <tr className="border-b border-white/10 text-gray-400 text-[10px] uppercase tracking-wider">
+                        <th className="py-3 px-4">VIN Number</th>
+                        <th className="py-3 px-4">Defect Name</th>
+                        <th className="py-3 px-4">Tenant / Workspace</th>
+                        <th className="py-3 px-4 text-center">Severity</th>
+                        <th className="py-3 px-4 text-center">Status</th>
+                        <th className="py-3 px-4">Assigned Operator</th>
+                        <th className="py-3 px-4 text-right">Created Date</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-white/5 text-xs text-gray-300">
+                      {filteredTelemetryAlerts.map((a: any) => {
+                        let sevClass = 'bg-gray-800 text-gray-400';
+                        if (a.severity === 'HIGH') sevClass = 'bg-orange-950/40 text-orange-400 border border-orange-900/40';
+                        else if (a.severity === 'CRITICAL' || a.severity === 'EMERGENCY') sevClass = 'bg-red-950/40 text-red-400 border border-red-900/40';
+                        else if (a.severity === 'MEDIUM') sevClass = 'bg-yellow-950/40 text-yellow-500 border border-yellow-900/40';
+
+                        let statClass = 'bg-gray-800 text-gray-300';
+                        if (a.status === 'OPEN') statClass = 'bg-blue-950/40 text-blue-400 border border-blue-900/40';
+                        else if (a.status === 'IN_PROGRESS') statClass = 'bg-amber-950/40 text-amber-500 border border-amber-900/40';
+                        else if (a.status === 'RESOLVED') statClass = 'bg-emerald-950/40 text-emerald-500 border border-emerald-900/40';
+                        else if (a.status === 'REOPENED') statClass = 'bg-rose-950/40 text-rose-500 border border-rose-900/40';
+                        else if (a.status === 'REASSIGNED') statClass = 'bg-sky-950/40 text-sky-400 border border-sky-900/40';
+
+                        return (
+                          <tr key={a.id} className="hover:bg-white/5 transition-all">
+                            <td className="py-3.5 px-4 font-mono font-bold text-white">{a.vin || 'SYSTEM_AUTO'}</td>
+                            <td className="py-3.5 px-4 font-medium text-white">{a.defectName}</td>
+                            <td className="py-3.5 px-4 text-gray-400 font-medium">{a.company?.name || 'Default Workspace'}</td>
+                            <td className="py-3.5 px-4 text-center">
+                              <span className={`px-2.5 py-0.5 rounded text-[9px] font-bold ${sevClass}`}>
+                                {a.severity}
+                              </span>
+                            </td>
+                            <td className="py-3.5 px-4 text-center">
+                              <span className={`px-2.5 py-0.5 rounded text-[9px] font-bold ${statClass}`}>
+                                {a.status}
+                              </span>
+                            </td>
+                            <td className="py-3.5 px-4 font-medium text-gray-300">
+                              {a.assignedToUser ? `${a.assignedToUser.name} (${a.assignedToUser.role})` : 'Dynamic / Unassigned'}
+                            </td>
+                            <td className="py-3.5 px-4 text-right text-gray-500 font-medium">
+                              {new Date(a.createdAt).toLocaleString()}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center py-16 text-gray-500">
+                  <AlertTriangle className="w-8 h-8 text-gray-600 mb-2" />
+                  <p className="text-xs font-semibold">No telemetry alert records found matching this category or search query.</p>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-4 border-t border-white/10 bg-[#0e121c] flex justify-between items-center text-xs text-gray-400">
+              <span>Showing {filteredTelemetryAlerts.length} telemetry records</span>
+              <button
+                onClick={() => setTelemetryModalOpen(false)}
+                className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white rounded-xl font-semibold transition-all"
+              >
+                Close Inspector
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

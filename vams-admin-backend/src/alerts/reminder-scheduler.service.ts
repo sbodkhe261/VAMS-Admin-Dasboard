@@ -82,22 +82,41 @@ export class ReminderSchedulerService implements OnModuleInit, OnModuleDestroy {
         if (alert.alertDefinitionId && escalationChain.length > 0 && elapsedAssignedMin >= escalationTimeoutMin) {
           this.logger.warn(`Alert ${alert.id} SLA exceeded timeout of ${escalationTimeoutMin}m. Escalate!`);
 
-          let nextUserId: string | null = null;
+          let rawNextTarget: string | null = null;
           let nextEscalationLevel = assignment.escalationLevel + 1;
           let loopCompleted = false;
 
           if (escalationChain.length > 0 && nextEscalationLevel <= escalationChain.length) {
-            // Pick next user in the escalation list
-            nextUserId = escalationChain[nextEscalationLevel - 1];
+            // Pick next target in the escalation list
+            rawNextTarget = escalationChain[nextEscalationLevel - 1];
           } else {
-            // Loop back around to the first user
-            nextUserId = escalationChain[0] || primaryAssigneeId;
+            // Loop back around to the first step
+            rawNextTarget = escalationChain[0] || primaryAssigneeId;
             nextEscalationLevel = 1;
             loopCompleted = true;
           }
 
-          if (nextUserId) {
-            this.logger.log(`Escalating alert ${alert.id} to user ${nextUserId} (Level: ${nextEscalationLevel})`);
+          if (rawNextTarget) {
+            const roleMap: Record<string, string> = {
+              role_COMPANY_ADMIN: 'COMPANY_ADMIN',
+              role_SUPERVISOR: 'SUPERVISOR',
+              role_FACTORY_MANAGER: 'FACTORY_MANAGER',
+              role_SERVICE_ENGINEER: 'SERVICE_ENGINEER',
+              role_WORKER: 'WORKER',
+              role_QUALITY_INSPECTOR: 'QUALITY_INSPECTOR',
+              COMPANY_ADMIN: 'COMPANY_ADMIN',
+              SUPERVISOR: 'SUPERVISOR',
+              FACTORY_MANAGER: 'FACTORY_MANAGER',
+              SERVICE_ENGINEER: 'SERVICE_ENGINEER',
+              WORKER: 'WORKER',
+              QUALITY_INSPECTOR: 'QUALITY_INSPECTOR',
+            };
+
+            const isRoleTarget = !!roleMap[rawNextTarget];
+            const nextTargetRole = isRoleTarget ? roleMap[rawNextTarget] : null;
+            const nextUserId = isRoleTarget ? null : rawNextTarget;
+
+            this.logger.log(`Escalating alert ${alert.id} to ${isRoleTarget ? `ROLE: ${nextTargetRole}` : `USER: ${nextUserId}`} (Level: ${nextEscalationLevel})`);
 
             // Perform transaction to execute transition
             await this.prisma.$transaction(async (tx) => {
@@ -108,11 +127,11 @@ export class ReminderSchedulerService implements OnModuleInit, OnModuleDestroy {
               });
 
               // Create new assignment
-              const newAssignment = await tx.alertAssignment.create({
+              await tx.alertAssignment.create({
                 data: {
                   alertId: alert.id,
                   severity: alert.severity,
-                  assignedToId: nextUserId!,
+                  assignedToId: isRoleTarget ? rawNextTarget : nextUserId!,
                   assignedAt: now,
                   notifiedAt: now,
                   seenAt: null,
@@ -123,32 +142,51 @@ export class ReminderSchedulerService implements OnModuleInit, OnModuleDestroy {
               });
 
               // Update Alert assignee details
-              const nextUser = await tx.user.findUnique({ where: { id: nextUserId! } });
+              let resolvedRole = 'WORKER';
+              if (isRoleTarget) {
+                resolvedRole = nextTargetRole!;
+              } else {
+                const nextUser = await tx.user.findUnique({ where: { id: nextUserId! } });
+                if (nextUser) resolvedRole = nextUser.role;
+              }
+
               await tx.alert.update({
                 where: { id: alert.id },
                 data: {
                   assignedToUserId: nextUserId,
-                  assignedToRole: nextUser ? nextUser.role : 'WORKER',
+                  assignedToRole: resolvedRole as any,
                 },
               });
 
-              // Write Audit Log
+              // Write Audit Log for all target members
               const crypto = require('crypto');
-              await tx.alertNotificationLog.create({
-                data: {
-                  id: crypto.randomUUID(),
-                  alertId: alert.id,
-                  userId: nextUserId!,
-                  type: 'ESCALATION',
-                  message: `Alert SLA exceeded. Auto-escalated to level ${nextEscalationLevel}.`,
-                },
-              });
+              let targetUsers: any[] = [];
+              if (isRoleTarget) {
+                targetUsers = await tx.user.findMany({
+                  where: { companyId: alert.companyId, role: resolvedRole as any, isActive: true }
+                });
+              } else if (nextUserId) {
+                const u = await tx.user.findUnique({ where: { id: nextUserId } });
+                if (u) targetUsers.push(u);
+              }
+
+              for (const targetUser of targetUsers) {
+                await tx.alertNotificationLog.create({
+                  data: {
+                    id: crypto.randomUUID(),
+                    alertId: alert.id,
+                    userId: targetUser.id,
+                    type: 'ESCALATION',
+                    message: `Alert SLA exceeded. Auto-escalated to level ${nextEscalationLevel} (Role: ${resolvedRole}).`,
+                  },
+                });
+              }
 
               await tx.defectResolutionTimeline.create({
                 data: {
                   alertId: alert.id,
                   actionType: 'ASSIGNED',
-                  details: `Alert auto-escalated to ${nextUser ? nextUser.name : 'Operator'} (Level ${nextEscalationLevel}) due to SLA timeout.`,
+                  details: `Alert auto-escalated to ${isRoleTarget ? `All ${resolvedRole}s` : (targetUsers[0]?.name || 'Operator')} (Level ${nextEscalationLevel}) due to SLA timeout.`,
                 },
               });
 
@@ -169,7 +207,7 @@ export class ReminderSchedulerService implements OnModuleInit, OnModuleDestroy {
                       alertId: alert.id,
                       userId: adminUser.id,
                       type: 'ESCALATION',
-                      message: `ALERT SLA ALERT LOOP COMPLETE: Alert has looped through entire escalation chain and remains unresolved.`,
+                      message: `ALERT SLA LOOP COMPLETE: Alert has looped through entire escalation chain and remains unresolved.`,
                     },
                   });
                 }
@@ -179,14 +217,15 @@ export class ReminderSchedulerService implements OnModuleInit, OnModuleDestroy {
             // Trigger core notification webhook
             const coreUrl = process.env.CORE_BACKEND_URL || 'http://127.0.0.1:3000/api/v1';
             try {
-              const msg = `SLA Exceeded. Escalated to you: defect '${alert.defectName}' (VIN: ${alert.vin || 'N/A'}).`;
+              const msg = `SLA Exceeded. Escalated to ${isRoleTarget ? `Role ${nextTargetRole}` : 'you'}: defect '${alert.defectName}' (VIN: ${alert.vin || 'N/A'}).`;
               
               const payload: any = {
                 source: 'scheduler',
                 event_type: 'ESCALATION',
                 companyId: alert.companyId,
                 alertId: alert.id,
-                assignedToUserId: nextUserId,
+                assignedToUserId: nextUserId || undefined,
+                assignedToRole: nextTargetRole || undefined,
                 message: msg,
               };
 

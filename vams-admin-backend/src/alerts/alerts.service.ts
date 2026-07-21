@@ -21,11 +21,29 @@ export class AlertsService {
     if (!alertDef) throw new NotFoundException('Alert definition template not found');
 
     // Auto-resolve assignee details and severity from definition, allowing overrides
-    let assignedToUserId = dto.assignedToUserId || alertDef.primaryAssigneeId;
+    let assignedToUserId: string | null = dto.assignedToUserId || alertDef.primaryAssigneeId;
     let assignedToRole = dto.assignedToRole;
     let primaryUser: any = null;
 
-    if (assignedToUserId) {
+    const roleMap: Record<string, string> = {
+      role_COMPANY_ADMIN: 'COMPANY_ADMIN',
+      role_SUPERVISOR: 'SUPERVISOR',
+      role_FACTORY_MANAGER: 'FACTORY_MANAGER',
+      role_SERVICE_ENGINEER: 'SERVICE_ENGINEER',
+      role_WORKER: 'WORKER',
+      role_QUALITY_INSPECTOR: 'QUALITY_INSPECTOR',
+      COMPANY_ADMIN: 'COMPANY_ADMIN',
+      SUPERVISOR: 'SUPERVISOR',
+      FACTORY_MANAGER: 'FACTORY_MANAGER',
+      SERVICE_ENGINEER: 'SERVICE_ENGINEER',
+      WORKER: 'WORKER',
+      QUALITY_INSPECTOR: 'QUALITY_INSPECTOR',
+    };
+
+    if (assignedToUserId && roleMap[assignedToUserId]) {
+      assignedToRole = roleMap[assignedToUserId] as any;
+      assignedToUserId = null; // Role-based pool assignment
+    } else if (assignedToUserId) {
       primaryUser = await this.prisma.user.findUnique({ where: { id: assignedToUserId } });
       if (!assignedToRole && primaryUser) {
         assignedToRole = primaryUser.role;
@@ -92,7 +110,7 @@ export class AlertsService {
         data: {
           alertId: newAlert.id,
           severity: severity as any,
-          assignedToId: assignedToUserId,
+          assignedToId: assignedToUserId || `role_${assignedToRole}` || 'UNASSIGNED',
           assignedAt: new Date(),
           notifiedAt: new Date(),
           seenAt: null,
@@ -373,6 +391,10 @@ export class AlertsService {
     const isGlobal = !companyId || companyId === 'all';
     return this.prisma.alert.findMany({
       where: isGlobal ? {} : { companyId },
+      include: {
+        assignedToUser: { select: { id: true, name: true, role: true } },
+        company: { select: { id: true, name: true } },
+      },
       orderBy: { updatedAt: 'desc' },
     });
   }
@@ -495,6 +517,7 @@ export class AlertsService {
             title: dto.title,
             message: dto.message,
             targetUserIds: Array.isArray(dto.targetUserIds) && dto.targetUserIds.length > 0 ? dto.targetUserIds : undefined,
+            targetRoles: Array.isArray(dto.targetRoles) && dto.targetRoles.length > 0 ? dto.targetRoles : undefined,
           }),
         });
 
@@ -503,27 +526,32 @@ export class AlertsService {
         } else {
           const errorText = await response.text();
           console.warn('[BROADCAST SYNC WARNING] VAMS core alerts engine returned error:', errorText);
-          await this.triggerBroadcastFallback(companyId, dto.title, dto.message, dto.targetUserIds);
+          await this.triggerBroadcastFallback(companyId, dto.title, dto.message, dto.targetUserIds, dto.targetRoles);
         }
       } catch (err: any) {
         console.warn('Failed to send broadcast webhook to core backend. Running fallback:', err.message);
-        await this.triggerBroadcastFallback(companyId, dto.title, dto.message, dto.targetUserIds);
+        await this.triggerBroadcastFallback(companyId, dto.title, dto.message, dto.targetUserIds, dto.targetRoles);
       }
     })();
 
     return broadcast;
   }
 
-  private async triggerBroadcastFallback(companyId: string, title: string, message: string, targetUserIds?: string[]) {
+  private async triggerBroadcastFallback(companyId: string, title: string, message: string, targetUserIds?: string[], targetRoles?: string[]) {
     try {
+      const orConditions: any[] = [];
+      if (targetUserIds && targetUserIds.length > 0) {
+        orConditions.push({ id: { in: targetUserIds } });
+      }
+      if (targetRoles && targetRoles.length > 0) {
+        orConditions.push({ role: { in: targetRoles } });
+      }
+
       const targetUsers = await this.prisma.user.findMany({
         where: {
-          ...(targetUserIds && targetUserIds.length > 0
-            ? { id: { in: targetUserIds } }
-            : {
-                isActive: true,
-                ...(companyId && companyId !== 'all' ? { companyId } : {}),
-              }),
+          isActive: true,
+          ...(companyId && companyId !== 'all' ? { companyId } : {}),
+          ...(orConditions.length > 0 ? { OR: orConditions } : {}),
         },
       });
       const crypto = require('crypto');
